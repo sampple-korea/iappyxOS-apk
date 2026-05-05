@@ -26,7 +26,6 @@
 package com.iappyx.generated.placeholder;
 
 import android.Manifest;
-import android.app.Activity;
 import android.app.AlarmManager;
 import android.content.BroadcastReceiver;
 import android.app.NotificationChannel;
@@ -82,10 +81,15 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
+import androidx.core.content.IntentCompat;
+import androidx.core.os.BundleCompat;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -102,7 +106,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-public class ShellActivity extends Activity {
+public class ShellActivity extends ComponentActivity {
 
     private WebView webView;
     private android.widget.ProgressBar progressBar;
@@ -193,6 +197,29 @@ public class ShellActivity extends Activity {
     private static final int REQ_PICK_FILE      = 2013;
     private String pendingPickFileCbId;
 
+    /** Modern ActivityResult routing — see {@link #launchForResult}.
+     *  Each launch pushes its request code; the launcher's callback pops in
+     *  FIFO order (Android serializes foreground starts) and re-enters the
+     *  same {@link #onActivityResult} switch we used to dispatch into. */
+    private final java.util.ArrayDeque<Integer> pendingActivityRcs = new java.util.ArrayDeque<>();
+
+    private final ActivityResultLauncher<Intent> activityLauncher = registerForActivityResult(
+        new ActivityResultContracts.StartActivityForResult(),
+        result -> {
+            Integer rc = pendingActivityRcs.pollFirst();
+            if (rc == null) return;
+            onActivityResult(rc, result.getResultCode(), result.getData());
+        }
+    );
+
+    /** Helper that replaces deprecated {@code startActivityForResult(intent, rc)}.
+     *  Routes the launch through {@link #activityLauncher} and keeps the result
+     *  delivery flowing through the existing {@link #onActivityResult} switch. */
+    private void launchForResult(Intent intent, int rc) {
+        pendingActivityRcs.addLast(rc);
+        activityLauncher.launch(intent);
+    }
+
     private final Map<Integer, String> pendingCallbacks = new HashMap<>();
     private Runnable pendingCameraAction;
     private String pendingPhotoCallbackId;
@@ -236,24 +263,7 @@ public class ShellActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Status/nav bar styling
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            getWindow().setStatusBarColor(0xFF0D0D1A);
-            getWindow().setNavigationBarColor(0xFF0D0D1A);
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // Light status bar icons (white icons on dark background)
-            getWindow().getDecorView().setSystemUiVisibility(0);
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true);
-            setTurnScreenOn(true);
-        } else {
-            getWindow().addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
-        }
+        applyWindowStyling();
         sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         nfcAdapter = NfcAdapter.getDefaultAdapter(this);
 
@@ -265,7 +275,14 @@ public class ShellActivity extends Activity {
         progressBar.setProgress(0);
         progressBar.setVisibility(android.view.View.GONE);
         progressBar.setIndeterminate(false);
-        progressBar.getProgressDrawable().setColorFilter(0xFF4FC3F7, android.graphics.PorterDuff.Mode.SRC_IN);
+        // setColorFilter(int, PorterDuff.Mode) deprecated at API 29 in favor
+        // of setColorFilter(BlendModeColorFilter). minSdk 26 needs both paths.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            progressBar.getProgressDrawable().setColorFilter(
+                new android.graphics.BlendModeColorFilter(0xFF4FC3F7, android.graphics.BlendMode.SRC_IN));
+        } else {
+            legacyTintDrawable(progressBar.getProgressDrawable(), 0xFF4FC3F7);
+        }
 
         offlineBanner = new android.widget.TextView(this);
         offlineBanner.setText("\u26A0 Offline \u2014 tap to retry");
@@ -295,8 +312,7 @@ public class ShellActivity extends Activity {
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setAllowFileAccessFromFileURLs(false);
-        s.setAllowUniversalAccessFromFileURLs(false);
+        applyDefensiveFileAccessFlags(s); // setAllow*FileURLs deprecated, defaults are already false on API 30+
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(true); // needed for file:///android_asset/ loading
 
@@ -380,7 +396,7 @@ public class ShellActivity extends Activity {
                 pendingFileCallback = filePathCallback;
                 Intent intent = params.createIntent();
                 try {
-                    startActivityForResult(intent, REQ_FILE_PICKER);
+                    launchForResult(intent, REQ_FILE_PICKER);
                 } catch (Exception e) {
                     pendingFileCallback = null;
                     return false;
@@ -418,8 +434,19 @@ public class ShellActivity extends Activity {
                 return true;
             }
 
+            // Modern API 23+ form. Framework only invokes this on main-frame
+            // errors; we filter on the request matching the page URL.
             @Override
-            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+            public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
+                if (request == null || !request.isForMainFrame()) return;
+                String failingUrl = request.getUrl() != null ? request.getUrl().toString() : "";
+                int errorCode = error != null ? error.getErrorCode() : -1;
+                String description = error != null && error.getDescription() != null
+                    ? error.getDescription().toString() : "Unknown error";
+                handleWebViewError(view, errorCode, description, failingUrl);
+            }
+
+            private void handleWebViewError(WebView view, int errorCode, String description, String failingUrl) {
                 lastFailedUrl = failingUrl;
 
                 progressBar.setVisibility(android.view.View.GONE);
@@ -598,6 +625,126 @@ public class ShellActivity extends Activity {
         });
     }
 
+    /** Window/status-bar styling for onCreate. Several APIs touched here are
+     *  deprecated on SDK 35 (setStatusBarColor / setNavigationBarColor) or
+     *  pre-O_MR1 (FLAG_SHOW_WHEN_LOCKED) — all still functional, replacement
+     *  paths are architectural. Suppression scoped to this helper. */
+    @SuppressWarnings("deprecation")
+    private void applyWindowStyling() {
+        // minSdk 26 ≥ LOLLIPOP, so the older guard is no longer needed.
+        getWindow().setStatusBarColor(0xFF0D0D1A);
+        getWindow().setNavigationBarColor(0xFF0D0D1A);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        } else {
+            // Android 8.0 only — modern setShowWhenLocked is API 27+.
+            getWindow().addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+    }
+
+    /** Modern bitmap loader for content URIs. Replaces deprecated
+     *  MediaStore.Images.Media.getBitmap. Returns mutable software bitmap. */
+    private Bitmap loadBitmap(Uri uri) throws java.io.IOException {
+        return android.graphics.ImageDecoder.decodeBitmap(
+            android.graphics.ImageDecoder.createSource(getContentResolver(), uri),
+            (decoder, info, src) -> {
+                decoder.setAllocator(android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE);
+                decoder.setMutableRequired(true);
+            });
+    }
+
+    /** Pre-S MediaRecorder ctor — isolated suppression. */
+    @SuppressWarnings("deprecation")
+    private android.media.MediaRecorder legacyMediaRecorder() {
+        return new android.media.MediaRecorder();
+    }
+
+    /** Pre-S SmsManager accessor — isolated suppression. */
+    @SuppressWarnings("deprecation")
+    private SmsManager legacySmsManager() {
+        return SmsManager.getDefault();
+    }
+
+    /** Pre-S VIBRATOR_SERVICE accessor — isolated suppression. */
+    @SuppressWarnings("deprecation")
+    private Vibrator legacyVibrator() {
+        return (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+    }
+
+    /** Pre-R single-shot location request fallback. */
+    @SuppressWarnings("deprecation")
+    private void legacyRequestSingleUpdate(LocationManager lm, LocationListener listener) {
+        lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, null);
+    }
+
+    /** Pre-Q thumbnail fallback — minSdk 26 means this branch is live on
+     *  Android 8.0-9 only. Replacement is ContentResolver.loadThumbnail (API 29+). */
+    @SuppressWarnings("deprecation")
+    private Bitmap legacyThumbnail(long imageId) {
+        return MediaStore.Images.Thumbnails.getThumbnail(getContentResolver(),
+            imageId, MediaStore.Images.Thumbnails.MINI_KIND, null);
+    }
+
+    /** Pre-Q drawable tint — Android 8.0-9 only. */
+    @SuppressWarnings("deprecation")
+    private void legacyTintDrawable(android.graphics.drawable.Drawable d, int color) {
+        d.setColorFilter(color, android.graphics.PorterDuff.Mode.SRC_IN);
+    }
+
+    /** setAllowFileAccessFromFileURLs / setAllowUniversalAccessFromFileURLs are
+     *  deprecated since API 30 because their defaults are already false there.
+     *  We still set them defensively for older Android versions; suppressed. */
+    @SuppressWarnings("deprecation")
+    private void applyDefensiveFileAccessFlags(WebSettings s) {
+        s.setAllowFileAccessFromFileURLs(false);
+        s.setAllowUniversalAccessFromFileURLs(false);
+    }
+
+    /** Shared BLE notification dispatch — invoked by both API 33+ and pre-33
+     *  onCharacteristicChanged overrides. */
+    private void fireBleNotification(String address, android.bluetooth.BluetoothGattCharacteristic c, byte[] value) {
+        String key = address + "|" + c.getService().getUuid() + "|" + c.getUuid();
+        java.util.Map<String, String> subs = bleSubscriptions.get(key);
+        if (subs == null) return;
+        String fn = subs.get("fn");
+        if (fn == null) return;
+        if (value == null) return;
+        StringBuilder hex = new StringBuilder();
+        for (byte b : value) hex.append(String.format("%02x", b));
+        String str = new String(value, java.nio.charset.StandardCharsets.UTF_8);
+        fireEvent(fn, "{\"value\":\"" + escapeJson(str) + "\",\"hex\":\"" + hex + "\"}");
+    }
+
+    /** API 33+ writeCharacteristic returns status code; pre-33 uses deprecated setValue + write. */
+    @SuppressWarnings("deprecation")
+    private boolean writeBleCharacteristic(android.bluetooth.BluetoothGatt gatt,
+            android.bluetooth.BluetoothGattCharacteristic ch, byte[] bytes) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            int rc = gatt.writeCharacteristic(ch, bytes,
+                android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            return rc == android.bluetooth.BluetoothStatusCodes.SUCCESS;
+        } else {
+            ch.setValue(bytes);
+            return gatt.writeCharacteristic(ch);
+        }
+    }
+
+    /** API 33+ writeDescriptor with explicit byte[]; pre-33 setValue + write. */
+    @SuppressWarnings("deprecation")
+    private void writeBleDescriptor(android.bluetooth.BluetoothGatt gatt,
+            android.bluetooth.BluetoothGattDescriptor desc, byte[] bytes) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            gatt.writeDescriptor(desc, bytes);
+        } else {
+            desc.setValue(bytes);
+            gatt.writeDescriptor(desc);
+        }
+    }
+
     private Bitmap fixOrientation(Bitmap bmp, Uri photoUri) {
         try {
             if (photoUri == null) return bmp;
@@ -681,6 +828,11 @@ public class ShellActivity extends Activity {
         });
     }
 
+    // onBackPressed is deprecated on ComponentActivity — replacement is
+    // OnBackPressedCallback. Migration is non-trivial because the WebView
+    // back-navigation needs to be the primary handler; keeping the override
+    // for now and suppressing.
+    @SuppressWarnings("deprecation")
     @Override public void onBackPressed() {
         if (webView.canGoBack()) webView.goBack(); else super.onBackPressed();
     }
@@ -821,11 +973,11 @@ public class ShellActivity extends Activity {
         }
         String action = intent.getAction() != null ? intent.getAction() : "";
         // Handle NFC tag discovered (any NFC action, or check for tag extra)
-        Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+        Tag tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag.class);
         if (tag != null || NfcAdapter.ACTION_TAG_DISCOVERED.equals(action) ||
             NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action) ||
             NfcAdapter.ACTION_TECH_DISCOVERED.equals(action)) {
-            if (tag == null) tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+            if (tag == null) tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag.class);
 
             // Handle pending NFC write
             if (tag != null && (pendingNfcWriteText != null || pendingNfcWriteUri != null)) {
@@ -901,7 +1053,8 @@ public class ShellActivity extends Activity {
 
                     // NDEF records
                     JSONArray records = new JSONArray();
-                    android.os.Parcelable[] rawMsgs = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
+                    android.os.Parcelable[] rawMsgs = IntentCompat.getParcelableArrayExtra(
+                        intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage.class);
                     if (rawMsgs != null) {
                         for (android.os.Parcelable rawMsg : rawMsgs) {
                             NdefMessage msg = (NdefMessage) rawMsg;
@@ -1029,11 +1182,11 @@ public class ShellActivity extends Activity {
                 }, 500);
             }
         } else if (type.startsWith("image/")) {
-            Uri imageUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            Uri imageUri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri.class);
             if (imageUri != null) {
                 new Thread(() -> {
                     try {
-                        Bitmap bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), imageUri);
+                        Bitmap bmp = loadBitmap(imageUri);
                         if (bmp != null) {
                             int w = bmp.getWidth(), h = bmp.getHeight();
                             if (w > 1200) { h = h * 1200 / w; w = 1200; }
@@ -1078,6 +1231,11 @@ public class ShellActivity extends Activity {
         }
     }
 
+    // We migrated all the bridge sites to launchForResult / activityLauncher.
+    // The launcher's callback re-enters this method to dispatch into the same
+    // legacy switch — that's intentional, and the ComponentActivity deprecation
+    // warning on the override is unavoidable for this dispatch shape.
+    @SuppressWarnings("deprecation")
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -1142,9 +1300,9 @@ public class ShellActivity extends Activity {
                 try {
                     Bitmap bmp = null;
                     if (pendingPhotoUri != null)
-                        bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), pendingPhotoUri);
+                        bmp = loadBitmap(pendingPhotoUri);
                     if (bmp == null && data != null && data.getExtras() != null)
-                        bmp = (Bitmap) data.getExtras().get("data");
+                        bmp = BundleCompat.getParcelable(data.getExtras(), "data", Bitmap.class);
                     if (bmp == null) {
                         deliverResult(pendingPhotoCallbackId, "{\"ok\":false,\"error\":\"no image\"}");
                         return;
@@ -1214,9 +1372,9 @@ public class ShellActivity extends Activity {
                 try {
                     Bitmap bmp = null;
                     if (pendingPhotoUri != null)
-                        bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), pendingPhotoUri);
+                        bmp = loadBitmap(pendingPhotoUri);
                     if (bmp == null && data != null && data.getExtras() != null)
-                        bmp = (Bitmap) data.getExtras().get("data");
+                        bmp = BundleCompat.getParcelable(data.getExtras(), "data", Bitmap.class);
                     if (bmp != null) {
                         bmp = fixOrientation(bmp, pendingPhotoUri);
                         final Bitmap qrBmp = bmp;
@@ -1260,9 +1418,9 @@ public class ShellActivity extends Activity {
                 Bitmap bmp = null;
                 try {
                     if (pendingPhotoUri != null)
-                        bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), pendingPhotoUri);
+                        bmp = loadBitmap(pendingPhotoUri);
                     if (bmp == null && data != null && data.getExtras() != null)
-                        bmp = (Bitmap) data.getExtras().get("data");
+                        bmp = BundleCompat.getParcelable(data.getExtras(), "data", Bitmap.class);
                     if (bmp != null) {
                         bmp = fixOrientation(bmp, pendingPhotoUri);
                         final Bitmap ocrBmp = bmp;
@@ -1339,9 +1497,9 @@ public class ShellActivity extends Activity {
                 Bitmap bmp = null;
                 try {
                     if (pendingPhotoUri != null)
-                        bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), pendingPhotoUri);
+                        bmp = loadBitmap(pendingPhotoUri);
                     if (bmp == null && data != null && data.getExtras() != null)
-                        bmp = (Bitmap) data.getExtras().get("data");
+                        bmp = BundleCompat.getParcelable(data.getExtras(), "data", Bitmap.class);
                     if (bmp != null) {
                         bmp = fixOrientation(bmp, pendingPhotoUri);
                         final Bitmap clsBmp = bmp;
@@ -1388,9 +1546,9 @@ public class ShellActivity extends Activity {
                 Bitmap bmp = null;
                 try {
                     if (pendingPhotoUri != null)
-                        bmp = MediaStore.Images.Media.getBitmap(getContentResolver(), pendingPhotoUri);
+                        bmp = loadBitmap(pendingPhotoUri);
                     if (bmp == null && data != null && data.getExtras() != null)
-                        bmp = (Bitmap) data.getExtras().get("data");
+                        bmp = BundleCompat.getParcelable(data.getExtras(), "data", Bitmap.class);
                     if (bmp != null) {
                         bmp = fixOrientation(bmp, pendingPhotoUri);
                         // Resize for performance
@@ -1497,7 +1655,11 @@ public class ShellActivity extends Activity {
         }
     }
 
-    // Bug #5: handle ALL permission request results
+    // Bug #5: handle ALL permission request results.
+    // ComponentActivity marks onRequestPermissionsResult deprecated in favor of
+    // ActivityResultContracts.RequestPermission — same architectural rewrite
+    // as onActivityResult. Suppressing for the same reason.
+    @SuppressWarnings("deprecation")
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] grants) {
         super.onRequestPermissionsResult(req, perms, grants);
@@ -1797,7 +1959,7 @@ public class ShellActivity extends Activity {
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("*/*");
             try {
-                startActivityForResult(intent, REQ_PICK_FILE);
+                launchForResult(intent, REQ_PICK_FILE);
             } catch (Exception e) {
                 deliverResult(cbId, "{\"ok\":false,\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
                 pendingPickFileCbId = null;
@@ -2351,7 +2513,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingPhotoUri = null; }
-            startActivityForResult(intent, REQ_CAMERA_PHOTO);
+            launchForResult(intent, REQ_CAMERA_PHOTO);
         }
 
         // Bug #3: use try-with-resources for FileOutputStream
@@ -2414,7 +2576,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingVideoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingVideoUri = null; }
-            startActivityForResult(intent, REQ_CAMERA_VIDEO);
+            launchForResult(intent, REQ_CAMERA_VIDEO);
         }
 
         @JavascriptInterface
@@ -2441,7 +2603,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingPhotoUri = null; }
-            startActivityForResult(intent, REQ_QR_SCAN);
+            launchForResult(intent, REQ_QR_SCAN);
         }
 
         @JavascriptInterface
@@ -2467,7 +2629,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingPhotoUri = null; }
-            startActivityForResult(intent, REQ_OCR_SCAN);
+            launchForResult(intent, REQ_OCR_SCAN);
         }
 
         @JavascriptInterface
@@ -2493,7 +2655,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingPhotoUri = null; }
-            startActivityForResult(intent, REQ_CLASSIFY);
+            launchForResult(intent, REQ_CLASSIFY);
         }
 
         @JavascriptInterface
@@ -2519,7 +2681,7 @@ public class ShellActivity extends Activity {
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (Exception e) { pendingPhotoUri = null; }
-            startActivityForResult(intent, REQ_SEGMENT);
+            launchForResult(intent, REQ_SEGMENT);
         }
 
         @JavascriptInterface
@@ -2693,17 +2855,29 @@ public class ShellActivity extends Activity {
             } else {
                 try {
                     final boolean[] delivered = {false};
-                    LocationListener listener = new LocationListener() {
-                        @Override public void onLocationChanged(Location l) { if (!delivered[0]) { delivered[0] = true; deliverResult(cbId, locationJson(l)); } }
-                        @Override public void onStatusChanged(String p, int s, Bundle e) {}
-                        @Override public void onProviderEnabled(String p) {}
-                        @Override public void onProviderDisabled(String p) { if (!delivered[0]) { delivered[0] = true; deliverResult(cbId, "{\"ok\":false,\"error\":\"location provider disabled\"}"); } }
-                    };
-                    lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, null);
-                    // Timeout after 15 seconds
-                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                        if (!delivered[0]) { delivered[0] = true; lm.removeUpdates(listener); deliverResult(cbId, "{\"ok\":false,\"error\":\"location timeout\"}"); }
-                    }, 15000);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        android.os.CancellationSignal cancel = new android.os.CancellationSignal();
+                        java.util.concurrent.Executor exec = java.util.concurrent.Executors.newSingleThreadExecutor();
+                        lm.getCurrentLocation(LocationManager.NETWORK_PROVIDER, cancel, exec, l -> {
+                            if (delivered[0]) return;
+                            delivered[0] = true;
+                            if (l != null) deliverResult(cbId, locationJson(l));
+                            else deliverResult(cbId, "{\"ok\":false,\"error\":\"location unavailable\"}");
+                        });
+                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                            if (!delivered[0]) { delivered[0] = true; cancel.cancel(); deliverResult(cbId, "{\"ok\":false,\"error\":\"location timeout\"}"); }
+                        }, 15000);
+                    } else {
+                        LocationListener listener = new LocationListener() {
+                            @Override public void onLocationChanged(Location l) { if (!delivered[0]) { delivered[0] = true; deliverResult(cbId, locationJson(l)); } }
+                            @Override public void onProviderEnabled(String p) {}
+                            @Override public void onProviderDisabled(String p) { if (!delivered[0]) { delivered[0] = true; deliverResult(cbId, "{\"ok\":false,\"error\":\"location provider disabled\"}"); } }
+                        };
+                        legacyRequestSingleUpdate(lm, listener);
+                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                            if (!delivered[0]) { delivered[0] = true; lm.removeUpdates(listener); deliverResult(cbId, "{\"ok\":false,\"error\":\"location timeout\"}"); }
+                        }, 15000);
+                    }
                 } catch (Exception e) {
                     deliverResult(cbId, "{\"ok\":false,\"error\":\"location unavailable\"}");
                 }
@@ -2739,7 +2913,6 @@ public class ShellActivity extends Activity {
                     if (!activityAlive) return;
                     fireEvent(callbackFn, locationJson(l));
                 }
-                @Override public void onStatusChanged(String p, int s, Bundle e) {}
                 @Override public void onProviderEnabled(String p) {}
                 @Override public void onProviderDisabled(String p) {
                     if (watchPositionErrorFn != null)
@@ -2834,7 +3007,6 @@ public class ShellActivity extends Activity {
                         }
                     }
                 }
-                @Override public void onStatusChanged(String p, int s, Bundle e) {}
                 @Override public void onProviderEnabled(String p) {}
                 @Override public void onProviderDisabled(String p) {}
             };
@@ -3077,11 +3249,10 @@ public class ShellActivity extends Activity {
     class VibrationBridge {
         private Vibrator getVibrator() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                android.os.VibratorManager vm = (android.os.VibratorManager)
-                    ShellActivity.this.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                android.os.VibratorManager vm = ShellActivity.this.getSystemService(android.os.VibratorManager.class);
                 return vm != null ? vm.getDefaultVibrator() : null;
             }
-            return (Vibrator) ShellActivity.this.getSystemService(Context.VIBRATOR_SERVICE);
+            return legacyVibrator();
         }
         @JavascriptInterface public void vibrate(final String msStr) { pattern("0," + msStr); }
         @JavascriptInterface
@@ -3094,9 +3265,8 @@ public class ShellActivity extends Activity {
                     for (int i = 0; i < parts.length; i++) t[i] = Long.parseLong(parts[i].trim());
                     Vibrator v = getVibrator();
                     if (v == null) return;
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                        v.vibrate(VibrationEffect.createWaveform(t, -1));
-                    else v.vibrate(t, -1);
+                    // minSdk 26 ≥ O, so the legacy long[] path was dead code.
+                    v.vibrate(VibrationEffect.createWaveform(t, -1));
                 } catch (Exception e) { Log.e("iappyxOS", "vibrate: " + e.getMessage()); }
             });
         }
@@ -3363,7 +3533,17 @@ public class ShellActivity extends Activity {
                     tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
                         @Override public void onStart(String id) {}
                         @Override public void onDone(String id) { fireEvent(callbackFn, "{\"done\":true}"); }
-                        @Override public void onError(String id) { fireEvent(callbackFn, "{\"done\":false,\"error\":\"tts error\"}"); }
+                        // API 21+ form (called on modern Android — preferred).
+                        @Override public void onError(String id, int errorCode) {
+                            fireEvent(callbackFn, "{\"done\":false,\"error\":\"tts error " + errorCode + "\"}");
+                        }
+                        // Pre-21 form — dead code at minSdk 26 but kept for the
+                        // @Override contract; the suppression silences the
+                        // warning emitted from overriding a deprecated method.
+                        @SuppressWarnings("deprecation")
+                        @Override public void onError(String id) {
+                            fireEvent(callbackFn, "{\"done\":false,\"error\":\"tts error\"}");
+                        }
                     });
                     tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "iappyx_tts");
                 }
@@ -3412,6 +3592,13 @@ public class ShellActivity extends Activity {
         }
 
         // Bug #12: add durationMs param, default to 10 min
+        //
+        // FULL_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP are deprecated since API 17.
+        // The replacement is Activity.setTurnScreenOn / setShowWhenLocked, which
+        // requires routing through the activity. Bridges currently call this
+        // from runOnUiThread but via a Context — the architectural fix is a
+        // separate refactor; the deprecated form still works on every Android.
+        @SuppressWarnings("deprecation")
         @JavascriptInterface
         public void wakeLock(final boolean acquire) {
             runOnUiThread(() -> {
@@ -4174,7 +4361,9 @@ public class ShellActivity extends Activity {
                 if (mediaRecorder != null) {
                     try { mediaRecorder.release(); } catch (Exception ignored) {}
                 }
-                mediaRecorder = new android.media.MediaRecorder();
+                mediaRecorder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    ? new android.media.MediaRecorder(ShellActivity.this)
+                    : legacyMediaRecorder();
                 mediaRecorder.setAudioSource(android.media.MediaRecorder.AudioSource.MIC);
                 mediaRecorder.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4);
                 mediaRecorder.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC);
@@ -4241,7 +4430,7 @@ public class ShellActivity extends Activity {
             }
             intent.putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 3);
             try {
-                startActivityForResult(intent, REQ_SPEECH);
+                launchForResult(intent, REQ_SPEECH);
             } catch (Exception e) {
                 deliverResult(cbId, "{\"ok\":false,\"error\":\"Speech recognition not available\"}");
             }
@@ -4334,7 +4523,9 @@ public class ShellActivity extends Activity {
                 return;
             }
             try {
-                SmsManager sm = SmsManager.getDefault();
+                SmsManager sm = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    ? getSystemService(SmsManager.class)
+                    : legacySmsManager();
                 ArrayList<String> parts = sm.divideMessage(message);
                 sm.sendMultipartTextMessage(number, null, parts, null, null);
                 if (cbId != null) deliverResult(cbId, "{\"ok\":true}");
@@ -4798,7 +4989,7 @@ public class ShellActivity extends Activity {
                         Intent intent = new Intent(Intent.ACTION_PICK,
                             MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
                         pendingMediaCbId = cbId;
-                        startActivityForResult(intent, REQ_MEDIA_PICK);
+                        launchForResult(intent, REQ_MEDIA_PICK);
                     });
                 } catch (Exception e) {
                     deliverResult(cbId, "{\"ok\":false,\"error\":\"" + escapeJson(e.getMessage()) + "\"}");
@@ -4869,13 +5060,16 @@ public class ShellActivity extends Activity {
                 try {
                     Uri uri = android.content.ContentUris.withAppendedId(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI, imageId);
+                    // minSdk 26 < Q (29), so the legacy Thumbnails branch was
+                    // reachable on API 26-28. Now using ContentResolver.loadThumbnail
+                    // unconditionally; on API 26-28 we fall back to the deprecated
+                    // form via the helper.
                     Bitmap bmp;
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         bmp = getContentResolver().loadThumbnail(uri,
                             new android.util.Size(320, 320), null);
                     } else {
-                        bmp = MediaStore.Images.Thumbnails.getThumbnail(getContentResolver(),
-                            imageId, MediaStore.Images.Thumbnails.MINI_KIND, null);
+                        bmp = legacyThumbnail(imageId);
                     }
                     if (bmp == null) {
                         deliverResult(cbId, "{\"ok\":false,\"error\":\"thumbnail not available\"}");
@@ -6528,6 +6722,16 @@ public class ShellActivity extends Activity {
                                     }
                                     latch.countDown();
                                 }
+                                // API 33+ form — receives the value directly.
+                                @Override
+                                public void onCharacteristicRead(android.bluetooth.BluetoothGatt g, android.bluetooth.BluetoothGattCharacteristic c, byte[] value, int status) {
+                                    if (bleReadLatch != null) {
+                                        bleReadValue = (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS) ? value : null;
+                                        bleReadLatch.countDown();
+                                    }
+                                }
+                                // Pre-33 form — uses deprecated getValue().
+                                @SuppressWarnings("deprecation")
                                 @Override
                                 public void onCharacteristicRead(android.bluetooth.BluetoothGatt g, android.bluetooth.BluetoothGattCharacteristic c, int status) {
                                     if (bleReadLatch != null) {
@@ -6542,19 +6746,16 @@ public class ShellActivity extends Activity {
                                         bleWriteLatch.countDown();
                                     }
                                 }
+                                // API 33+ form — receives the value directly.
+                                @Override
+                                public void onCharacteristicChanged(android.bluetooth.BluetoothGatt g, android.bluetooth.BluetoothGattCharacteristic c, byte[] value) {
+                                    fireBleNotification(address, c, value);
+                                }
+                                // Pre-33 form — uses deprecated getValue().
+                                @SuppressWarnings("deprecation")
                                 @Override
                                 public void onCharacteristicChanged(android.bluetooth.BluetoothGatt g, android.bluetooth.BluetoothGattCharacteristic c) {
-                                    String key = address + "|" + c.getService().getUuid() + "|" + c.getUuid();
-                                    java.util.Map<String, String> subs = bleSubscriptions.get(key);
-                                    if (subs == null) return;
-                                    String fn = subs.get("fn");
-                                    if (fn == null) return;
-                                    byte[] val = c.getValue();
-                                    if (val == null) return;
-                                    StringBuilder hex = new StringBuilder();
-                                    for (byte b : val) hex.append(String.format("%02x", b));
-                                    String str = new String(val, java.nio.charset.StandardCharsets.UTF_8);
-                                    fireEvent(fn, "{\"value\":\"" + escapeJson(str) + "\",\"hex\":\"" + hex + "\"}");
+                                    fireBleNotification(address, c, c.getValue());
                                 }
                             }, android.bluetooth.BluetoothDevice.TRANSPORT_LE);
                         } catch (SecurityException e) {
@@ -6648,11 +6849,10 @@ public class ShellActivity extends Activity {
                         int len = hexData.length() / 2;
                         byte[] bytes = new byte[len];
                         for (int i = 0; i < len; i++) bytes[i] = (byte) Integer.parseInt(hexData.substring(i * 2, i * 2 + 2), 16);
-                        ch.setValue(bytes);
                         bleWriteLatch = new java.util.concurrent.CountDownLatch(1);
                         bleWriteOk = false;
                         try {
-                            boolean queued = gatt.writeCharacteristic(ch);
+                            boolean queued = writeBleCharacteristic(gatt, ch, bytes);
                             if (!queued) { deliverResult(cbId, "{\"ok\":false,\"error\":\"write not queued\"}"); bleWriteLatch = null; return; }
                             bleWriteLatch.await(5, java.util.concurrent.TimeUnit.SECONDS);
                             deliverResult(cbId, bleWriteOk ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"write failed on device\"}");
@@ -6683,8 +6883,8 @@ public class ShellActivity extends Activity {
                     android.bluetooth.BluetoothGattDescriptor desc = ch.getDescriptor(
                         java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
                     if (desc != null) {
-                        desc.setValue(android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                        gatt.writeDescriptor(desc);
+                        writeBleDescriptor(gatt, desc,
+                            android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                     }
                     String key = address + "|" + serviceUuid + "|" + charUuid;
                     java.util.Map<String, String> sub = new java.util.HashMap<>();
@@ -6708,8 +6908,8 @@ public class ShellActivity extends Activity {
                     android.bluetooth.BluetoothGattDescriptor desc = ch.getDescriptor(
                         java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
                     if (desc != null) {
-                        desc.setValue(android.bluetooth.BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
-                        gatt.writeDescriptor(desc);
+                        writeBleDescriptor(gatt, desc,
+                            android.bluetooth.BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
                     }
                     bleSubscriptions.remove(address + "|" + serviceUuid + "|" + charUuid);
                 } catch (SecurityException ignored) {}
@@ -7077,7 +7277,8 @@ public class ShellActivity extends Activity {
             // #3 fix: unregister previous receiver before registering new one
             unregisterBtDiscovery();
             // Check adapter BEFORE registering receiver
-            android.bluetooth.BluetoothAdapter adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+            android.bluetooth.BluetoothManager btManager = getSystemService(android.bluetooth.BluetoothManager.class);
+            android.bluetooth.BluetoothAdapter adapter = btManager != null ? btManager.getAdapter() : null;
             if (adapter == null) { fireEvent(callbackFn, "{\"event\":\"error\",\"error\":\"Bluetooth not available\"}"); return; }
 
             btDiscoveryReceiver = new BroadcastReceiver() {
@@ -7085,7 +7286,9 @@ public class ShellActivity extends Activity {
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
                     if (android.bluetooth.BluetoothDevice.ACTION_FOUND.equals(action)) {
-                        android.bluetooth.BluetoothDevice dev = intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE);
+                        android.bluetooth.BluetoothDevice dev = IntentCompat.getParcelableExtra(
+                            intent, android.bluetooth.BluetoothDevice.EXTRA_DEVICE,
+                            android.bluetooth.BluetoothDevice.class);
                         if (dev == null) return;
                         String name = "";
                         try { name = dev.getName() != null ? dev.getName() : ""; } catch (SecurityException ignored) {}
@@ -7100,7 +7303,18 @@ public class ShellActivity extends Activity {
             android.content.IntentFilter filter = new android.content.IntentFilter();
             filter.addAction(android.bluetooth.BluetoothDevice.ACTION_FOUND);
             filter.addAction(android.bluetooth.BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
-            registerReceiver(btDiscoveryReceiver, filter);
+            // API-gated registration. Without RECEIVER_NOT_EXPORTED on
+            // Android 14+ (targetSdk 34+), dynamic registration of an
+            // unprotected receiver throws SecurityException — the FIRST
+            // call to iappyx.bluetooth.startScan() crashes the generated
+            // app. Other receivers in this file (locationUpdateReceiver,
+            // mediaButtonReceiver, mediaMetadataReceiver, wifiP2pReceiver)
+            // already pass the flag; this one was missed.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(btDiscoveryReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(btDiscoveryReceiver, filter);
+            }
             try {
                 if (adapter.isDiscovering()) adapter.cancelDiscovery();
                 adapter.startDiscovery();
@@ -7114,7 +7328,8 @@ public class ShellActivity extends Activity {
         @JavascriptInterface
         public void stopScan() {
             try {
-                android.bluetooth.BluetoothAdapter adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                android.bluetooth.BluetoothManager btManager = getSystemService(android.bluetooth.BluetoothManager.class);
+                android.bluetooth.BluetoothAdapter adapter = btManager != null ? btManager.getAdapter() : null;
                 if (adapter != null && adapter.isDiscovering()) adapter.cancelDiscovery();
             } catch (SecurityException ignored) {}
             unregisterBtDiscovery();
@@ -7129,7 +7344,8 @@ public class ShellActivity extends Activity {
                 }
                 android.bluetooth.BluetoothSocket socket = null;
                 try {
-                    android.bluetooth.BluetoothAdapter adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                    android.bluetooth.BluetoothManager btManager = getSystemService(android.bluetooth.BluetoothManager.class);
+                    android.bluetooth.BluetoothAdapter adapter = btManager != null ? btManager.getAdapter() : null;
                     if (adapter == null) { synchronized (btLock) { btRunning = false; } deliverResult(cbId, "{\"ok\":false,\"error\":\"Bluetooth not available\"}"); return; }
                     try { adapter.cancelDiscovery(); } catch (SecurityException ignored) {}
 
@@ -7453,6 +7669,10 @@ public class ShellActivity extends Activity {
             if (nsdRegistrationListener == null) releaseMulticastLock();
         }
 
+        // resolveService + getHost deprecated since API 34 in favor of
+        // registerServiceInfoCallback (streaming) — adapting it back to a
+        // single-shot bridge call is a separate refactor.
+        @SuppressWarnings("deprecation")
         @JavascriptInterface
         public void resolve(String serviceType, String serviceName, String cbId) {
             if (nsdManager == null) nsdManager = (android.net.nsd.NsdManager) getSystemService(Context.NSD_SERVICE);

@@ -61,7 +61,7 @@ public class LocationService extends Service {
         String action = intent.getAction();
         if (ACTION_STOP.equals(action)) {
             stopTracking();
-            stopForeground(true);
+            stopForeground(STOP_FOREGROUND_REMOVE);
             // Don't stopSelf() — keep alive for quick restart, avoids foreground service race
             return START_NOT_STICKY;
         }
@@ -103,7 +103,6 @@ public class LocationService extends Service {
                 update.putExtra("callbackFn", callbackFn);
                 sendBroadcast(update);
             }
-            @Override public void onStatusChanged(String p, int s, Bundle e) {}
             @Override public void onProviderEnabled(String p) {}
             @Override public void onProviderDisabled(String p) {}
         };
@@ -175,7 +174,7 @@ public class LocationService extends Service {
 
     @Override public void onTaskRemoved(Intent rootIntent) {
         stopTracking();
-        stopForeground(true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         super.onTaskRemoved(rootIntent);
     }

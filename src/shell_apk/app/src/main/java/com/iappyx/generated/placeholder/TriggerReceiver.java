@@ -26,11 +26,11 @@ package com.iappyx.generated.placeholder;
 
 import android.bluetooth.BluetoothDevice;
 import android.content.BroadcastReceiver;
+import androidx.core.content.IntentCompat;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
 import android.net.ConnectivityManager;
-import android.net.NetworkInfo;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -60,6 +60,11 @@ public class TriggerReceiver extends BroadcastReceiver {
     private static volatile String lastWifiSsid;
     private static volatile boolean lastWifiConnected;
 
+    // NetworkInfo + WifiManager.getConnectionInfo are deprecated in favor of
+    // ConnectivityManager.NetworkCallback. Migrating this static manifest
+    // BroadcastReceiver to NetworkCallback is an architectural rewrite of
+    // the trigger model — separate work. Suppressing the deprecation here.
+    @SuppressWarnings("deprecation")
     @Override
     public void onReceive(Context context, Intent intent) {
         if (intent == null || intent.getAction() == null) return;
@@ -81,12 +86,8 @@ public class TriggerReceiver extends BroadcastReceiver {
                 }
                 case BluetoothDevice.ACTION_ACL_CONNECTED:
                 case BluetoothDevice.ACTION_ACL_DISCONNECTED: {
-                    BluetoothDevice dev;
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
-                    } else {
-                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                    }
+                    BluetoothDevice dev = IntentCompat.getParcelableExtra(
+                        intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
                     if (dev == null) return;
                     String addr = dev.getAddress();
                     String name = safeBtName(context, dev);
@@ -98,7 +99,11 @@ public class TriggerReceiver extends BroadcastReceiver {
                     break;
                 }
                 case WifiManager.NETWORK_STATE_CHANGED_ACTION: {
-                    NetworkInfo ni = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
+                    // NetworkInfo class itself is deprecated; we keep using it because
+                    // it's the value type the system delivers in this broadcast extra.
+                    // Method-level @SuppressWarnings on onReceive covers this.
+                    android.net.NetworkInfo ni = IntentCompat.getParcelableExtra(
+                        intent, WifiManager.EXTRA_NETWORK_INFO, android.net.NetworkInfo.class);
                     if (ni == null) return;
                     boolean connected = ni.isConnected();
 
@@ -298,6 +303,7 @@ public class TriggerReceiver extends BroadcastReceiver {
      * Re-register dynamic receivers (BT + WiFi) on app start / boot.
      * Charger + headphones are declared statically in the manifest.
      */
+    @SuppressWarnings("deprecation") // see onReceive note — same WifiManager.getConnectionInfo legacy path
     public static void registerDynamic(Context context) {
         // Prime the WiFi edge-detector baseline from the current system state before any
         // broadcast arrives. Without this, `lastWifiConnected` stays false-by-default and

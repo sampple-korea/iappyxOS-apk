@@ -345,7 +345,7 @@ public class TaskService extends Service {
                 webView.destroy();
                 webView = null;
             }
-            stopForeground(true);
+            stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
         });
     }

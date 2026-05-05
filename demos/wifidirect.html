@@ -148,12 +148,19 @@ function sendMsg() {
   var myIp = iappyx.httpServer.getLocalIpAddress() || '';
   var target = isGroupOwner ? peerAddress : goAddress;
   if (!target) { log('Waiting for peer to send first message...'); addMsg('You', txt); return; }
-  fetch('http://' + target + ':' + SERVER_PORT + '/msg', {
+  var cb = '_wfdSendMsg_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+  window._iappyxCb = window._iappyxCb || {};
+  window._iappyxCb[cb] = function(r) {
+    delete window._iappyxCb[cb];
+    if (r && r.ok) addMsg('You', txt);
+    else log('Send failed: ' + ((r && r.error) || 'request failed'));
+  };
+  iappyx.httpClient.request(JSON.stringify({
+    url: 'http://' + target + ':' + SERVER_PORT + '/msg',
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({from: isGroupOwner ? 'Owner' : 'Client', text: txt, replyTo: myIp})
-  }).then(function() { addMsg('You', txt); })
-  .catch(function(e) { log('Send failed: ' + e.message); });
+    body: JSON.stringify({from: isGroupOwner ? 'Owner' : 'Client', text: txt, replyTo: myIp}),
+  }), cb);
   document.getElementById('msgtxt').value = '';
 }
 

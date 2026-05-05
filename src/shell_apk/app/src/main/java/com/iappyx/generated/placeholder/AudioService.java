@@ -125,7 +125,7 @@ public class AudioService extends Service {
             player.stop();
             player.clearMediaItems();
             stateIsPlaying = false;
-            stopForeground(true);
+            stopForeground(STOP_FOREGROUND_REMOVE);
             return START_NOT_STICKY;
         }
 
@@ -266,7 +266,7 @@ public class AudioService extends Service {
     @Override public void onTaskRemoved(Intent rootIntent) {
         player.stop();
         if (mediaSession != null) mediaSession.release();
-        stopForeground(true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         super.onTaskRemoved(rootIntent);
     }

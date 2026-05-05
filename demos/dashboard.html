@@ -92,11 +92,14 @@ function loadChartLib(){
   var cached=iappyx.storage.loadFile('chart.umd.min.js');
   if(cached&&cached.length>100){try{runScript(cached);chartReady=true;el.style.display='none';renderAll();return;}catch(e){iappyx.storage.deleteFile('chart.umd.min.js');}}
   el.textContent='Downloading Chart.js...';
-  fetch('https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js')
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()}).then(function(code){
-      if(code.length<100)throw new Error('incomplete');
-      iappyx.storage.saveFile('chart.umd.min.js',code);runScript(code);chartReady=true;el.style.display='none';renderAll();
-    }).catch(function(){el.textContent='Need internet on first launch';el.style.color='#ff6b6b';});
+  window._iappyxCb=window._iappyxCb||{};
+  window._iappyxCb.chartLibCb=function(res){
+    if(!res||!res.ok||res.status>=400||!res.body||res.body.length<100){
+      el.textContent='Need internet on first launch';el.style.color='#ff6b6b';return;
+    }
+    iappyx.storage.saveFile('chart.umd.min.js',res.body);runScript(res.body);chartReady=true;el.style.display='none';renderAll();
+  };
+  iappyx.httpClient.request(JSON.stringify({url:'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js'}),'chartLibCb');
 }
 
 function addEntry(){

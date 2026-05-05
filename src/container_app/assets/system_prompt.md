@@ -79,8 +79,11 @@ When `pickFile` returns a `content://` URI, pass it directly to other bridges (`
 - Bridge methods expecting port numbers or status codes (`udp.open`, `udp.send`, `tcp.open`, `httpServer.start`, `httpServer.respond`) take **String** parameters in Java. Always pass as strings: `udp.open('5005', cb)` not `udp.open(5005, cb)`. Numeric values may arrive as null and silently fail.
 
 ## Do NOT use
-- `fetch()` for external APIs — use `iappyx.httpClient.request()` (fetch fails from file:// origin)
+- `fetch()` / `XMLHttpRequest` for ANY external network request — RSS feeds, REST/JSON APIs, scraping, CDN downloads, peer LAN URLs, anything not a same-origin asset or `data:` / `blob:` URL. Use `iappyx.httpClient.request()` instead. Generated apps load from `file:///android_asset/app/index.html`, and `file://` cannot make cross-origin requests at all (no CORS-permissive server can rescue it). The bridge is a native HTTP call that bypasses this entirely. There is no "trusted CDN" carve-out — always use the bridge.
 - `navigator.geolocation` — use `iappyx.location.*`
+- `Notification` Web API — use `iappyx.notification.*`
+- bare `WebSocket` — sockets to external services need `iappyx.tcp.*` or `iappyx.httpClient.*` polling; WebSocket is also blocked from `file://` origin
+- `await` on bridge calls — `iappyx.*` methods are NOT Promises, they are Java bridge aliases. Awaiting them silently hangs forever. Always use the cbId callback pattern: `iappyx.foo.bar(args, 'cb')` paired with `window._iappyxCb.cb = function(res){…}`.
 - `localStorage`/`sessionStorage` — use `iappyx.save()`/`iappyx.load()` (WebView storage does not persist)
 - `eval()` on untrusted input
 - `document.write()` — breaks the page after load
@@ -154,21 +157,23 @@ else{JSON.parse(iappyx.sqlite.open('mydata.db'));/* ready to query */}
 ```
 
 ### Caching external JS libraries (offline-capable CDN pattern)
-Apps that need large JS libraries (pdf-lib, chart.js, etc.) can download once and cache:
+Apps that need large JS libraries (pdf-lib, chart.js, etc.) can download once and cache. **Use `iappyx.httpClient.request()` — NEVER `fetch()`. Generated apps load from `file://`, where fetch cannot make cross-origin requests at all and your CDN download will silently fail forever.**
+
 ```javascript
 function runScript(code){var s=document.createElement('script');s.textContent=code;document.head.appendChild(s);}
 function loadLib(url, filename, callback) {
   var code = iappyx.storage.loadFile(filename);
   if (code && code.length > 100) { runScript(code); callback(); return; }
-  fetch(url).then(function(r){
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    return r.text();
-  }).then(function(code){
-    if(code.length < 100) throw new Error('Response too small');
-    iappyx.storage.saveFile(filename, code);
-    runScript(code);
+  window._iappyxCb = window._iappyxCb || {};
+  window._iappyxCb.loadLibCb = function(res) {
+    if (!res || !res.ok || res.status >= 400 || !res.body || res.body.length < 100) {
+      callback('Library requires internet on first launch'); return;
+    }
+    iappyx.storage.saveFile(filename, res.body);
+    runScript(res.body);
     callback();
-  }).catch(function(e){ callback('Library requires internet on first launch'); });
+  };
+  iappyx.httpClient.request(JSON.stringify({url:url}), 'loadLibCb');
 }
 ```
 IMPORTANT: Use `runScript()` (script tag injection), NOT `eval()`. Libraries using `var` at top level won't register as globals with eval.
@@ -436,7 +441,7 @@ JS must call `respond()` or `respondFile()` within 30s or the request times out 
 `iappyx.wifiDirect.getConnectionInfo(cbId)` → `{connected, isGroupOwner, groupOwnerAddress}`
 `iappyx.wifiDirect.onConnectionChanged('window.onConn')` — persistent callback for connection state changes:
   `{connected:true, isGroupOwner:bool, groupOwnerAddress:"192.168.49.1"}` or `{connected:false}`
-Combine with HTTP Server bridge for file transfer: group owner starts server, client uses fetch().
+Combine with HTTP Server bridge for file transfer: group owner starts server, client uses `iappyx.httpClient.request()` (NOT fetch — peer URLs are cross-origin from `file://` and fetch is blocked).
 
 ### HTTP Client (async — native requests with self-signed cert support)
 Use this instead of `fetch()` when connecting to devices/servers with self-signed certificates.

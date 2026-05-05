@@ -156,9 +156,17 @@ function sendTextToAll() {
   var body = JSON.stringify({from: deviceName, text: txt});
   Object.keys(peers).forEach(function(k) {
     var p = peers[k];
-    fetch('http://' + p.host + ':' + p.port + '/text', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: body
-    }).catch(function(e) { log('Send failed to ' + p.name); });
+    var cb = '_lanSendText_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+    window._iappyxCb[cb] = function(r) {
+      delete window._iappyxCb[cb];
+      if (!r || !r.ok) log('Send failed to ' + p.name);
+    };
+    iappyx.httpClient.request(JSON.stringify({
+      url: 'http://' + p.host + ':' + p.port + '/text',
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: body,
+    }), cb);
   });
   addMsg('You', txt);
   document.getElementById('msgtxt').value = '';
@@ -175,9 +183,17 @@ window._iappyxCb.onPhotoTaken = function(r) {
   var body = JSON.stringify({from: deviceName, photo: b64});
   Object.keys(peers).forEach(function(k) {
     var p = peers[k];
-    fetch('http://' + p.host + ':' + p.port + '/photo', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: body
-    }).catch(function(e) { log('Photo send failed to ' + p.name); });
+    var cb = '_lanSendPhoto_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+    window._iappyxCb[cb] = function(res) {
+      delete window._iappyxCb[cb];
+      if (!res || !res.ok) log('Photo send failed to ' + p.name);
+    };
+    iappyx.httpClient.request(JSON.stringify({
+      url: 'http://' + p.host + ':' + p.port + '/photo',
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: body,
+    }), cb);
   });
 };
 

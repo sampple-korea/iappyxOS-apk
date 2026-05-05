@@ -85,19 +85,18 @@ function loadLibrary(){
     catch(e){iappyx.storage.deleteFile('pdf-lib.min.js');}
   }
   el.textContent='Downloading pdf-lib (first time only)...';
-  fetch('https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js')
-    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})
-    .then(function(code){
-      if(code.length<100)throw new Error('incomplete');
-      iappyx.storage.saveFile('pdf-lib.min.js',code);
-      runScript(code);
-      pdfLibReady=true;
-      el.style.display='none';
-    })
-    .catch(function(e){
+  window._iappyxCb=window._iappyxCb||{};
+  window._iappyxCb.pdfLibCb=function(res){
+    if(!res||!res.ok||res.status>=400||!res.body||res.body.length<100){
       el.textContent='Could not load pdf-lib. Connect to internet and restart.';
-      el.style.color='#ff6b6b';
-    });
+      el.style.color='#ff6b6b';return;
+    }
+    iappyx.storage.saveFile('pdf-lib.min.js',res.body);
+    runScript(res.body);
+    pdfLibReady=true;
+    el.style.display='none';
+  };
+  iappyx.httpClient.request(JSON.stringify({url:'https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js'}),'pdfLibCb');
 }
 
 function createPdf(){
