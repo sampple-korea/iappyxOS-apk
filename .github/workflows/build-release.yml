@@ -71,6 +71,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.27.4"
           channel: stable
           cache: true
 
@@ -84,7 +85,7 @@ jobs:
       - name: Verify APK signature
         run: |
           set -euo pipefail
-          apksigner verify --print-certs bin/iappyxOS.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs bin/iappyxOS.apk
 
       - name: Write release notes
         run: |
