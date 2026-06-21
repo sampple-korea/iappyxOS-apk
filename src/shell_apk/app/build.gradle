@@ -1,6 +1,14 @@
 plugins {
     id 'com.android.application'
 }
+
+def ciStoreFile = System.getenv('ANDROID_STORE_FILE')
+def hasCiSigning = ciStoreFile &&
+        file(ciStoreFile).exists() &&
+        System.getenv('ANDROID_KEY_ALIAS') &&
+        System.getenv('ANDROID_KEYSTORE_PASSWORD') &&
+        System.getenv('ANDROID_KEY_PASSWORD')
+
 android {
     namespace 'com.iappyx.generated.placeholder'
     compileSdk 35
@@ -13,11 +21,22 @@ android {
         // Only include 64-bit ARM — x86 is emulator-only, 32-bit ARM is obsolete (no phones sold since ~2018)
         ndk { abiFilters 'arm64-v8a' }
     }
+    signingConfigs {
+        release {
+            if (hasCiSigning) {
+                storeFile file(ciStoreFile)
+                storeType 'pkcs12'
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             shrinkResources false
-            signingConfig signingConfigs.debug
+            signingConfig hasCiSigning ? signingConfigs.release : signingConfigs.debug
         }
     }
     compileOptions {

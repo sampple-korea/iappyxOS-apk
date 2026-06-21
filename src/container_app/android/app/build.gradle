@@ -31,6 +31,9 @@ android {
                 keyAlias keyProps['keyAlias']
                 keyPassword keyProps['keyPassword']
                 storeFile file(keyProps['storeFile'])
+                if (keyProps['storeType']) {
+                    storeType keyProps['storeType']
+                }
                 storePassword keyProps['storePassword']
             }
         }
